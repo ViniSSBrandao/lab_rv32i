@@ -1,413 +1,179 @@
-# RV32I Pipelined Base Project
+# RV32I Pipelined — Extensão Completa do ISA
 
-Processador RISC-V de 32 bits com pipeline de 5 estágios implementado em SystemVerilog, baseado nas seções 4.6 a 4.10 de *Computer Organization and Design: RISC-V Edition* (Patterson & Hennessy). O projeto tem como plataforma alvo a placa **DE2-115** (Intel Cyclone IV E) e é estruturado para servir de base para extensões do conjunto de instruções pelos alunos.
+Processador RISC-V de 32 bits (`RV32I`) com pipeline de 5 estágios em SystemVerilog, direcionado à placa **DE2-115** (Intel Cyclone IV E — `EP4CE115F29C7`).
+
+Este projeto parte do **projeto base** (8 instruções iniciais e infraestrutura de pipeline, hazards e periféricos) e concentra-se na **implementação completa das instruções das Etapas 01, 02 e 03**, detalhando abaixo apenas as instruções adicionadas e as modificações necessárias na microarquitetura.
 
 ---
 
-## Instruções suportadas
+## Base do Projeto (Herdada)
 
-**Legenda:** ✅ implementação presente e coberta pelo teste padrão; 🧪 implementação presente, mas ainda sem resultado verificado em simulação; ❌ não implementada. A presença de uma instrução no `assembler.py` não comprova suporte pela CPU.
+O conjunto e a infraestrutura a seguir já vêm prontos do projeto base e foram mantidos como fundação:
 
-| # | Instrução | Tipo | Opcode  | Status |
-|---|-----------|------|---------|:------:|
-| 1 | `ADD`     | R    | 0110011 | ✅ |
-| 2 | `SUB`     | R    | 0110011 | ✅ |
-| 3 | `OR`      | R    | 0110011 | ✅ |
-| 4 | `AND`     | R    | 0110011 | ✅ |
-| 5 | `SLT`     | R    | 0110011 | ✅ |
-| 6 | `LW`      | I    | 0000011 | ✅ |
-| 7 | `SW`      | S    | 0100011 | ✅ |
-| 8 | `BEQ`     | B    | 1100011 | ✅ |
-| 9 | `XOR`     | R    | 0110011 | 🧪 |
-| 10 | `SLL`    | R    | 0110011 | 🧪 |
-| 11 | `SRL`    | R    | 0110011 | 🧪 |
-| 12 | `SRA`    | R    | 0110011 | 🧪 |
-| 13 | `SLTU`   | R    | 0110011 | 🧪 |
+- **Instruções base (8):** `ADD`, `SUB`, `OR`, `AND`, `SLT` (R-type), `LW` (I-type load), `SW` (S-type) e `BEQ` (B-type).
+- **Pipeline e hazards base:** estágios `IF → ID → EX → MEM → WB`, forwarding `EX/MEM → EX` e `MEM/WB → EX` (`src/pl_forward.sv`), detecção de load-use stall (`src/pl_hazard.sv`), resolução de desvio no estágio `EX` com flush de 2 ciclos, e banco de registradores com escrita em `negedge clk` (`src/pl_regfile.sv`).
+- **Infraestrutura de FPGA e ferramentas:** PLL 50 MHz → 10 MHz (`src/pl_top.sv`), controlador MMIO (`SW`, `KEY`, `LEDR`, `LEDG`, UART RS-232 9600 8N1 e contador de ciclos em `src/pl_mmio.sv`), montador (`assembler/assembler.py`) e captura via dump serial (`dump/serial_dump.py`).
 
-### Resumo de cobertura do ISA RV32I
+---
 
-| Categoria          | Total ISA | Implementadas | Faltando |
-|--------------------|:---------:|:-------------:|:--------:|
-| R-type             | 10        | 10 (5 sem validação) | 0 |
-| I-type aritmético  | 9         | 0             | 9        |
-| I-type load        | 5         | 1 (LW)        | 4        |
-| S-type             | 3         | 1 (SW)        | 2        |
-| B-type             | 6         | 1 (BEQ)       | 5        |
-| U-type             | 2         | 0             | 2        |
-| Jumps (JAL/JALR)   | 2         | 0             | 2        |
-| **Total**          | **37**    | **13 (5 sem validação)** | **24** |
+## Visão Geral de Cobertura (RV32I)
+
+| Categoria | Total ISA | Base | Implementadas nas Etapas | Total Atual |
+|---|:---:|:---:|:---:|:---:|
+| R-type | 10 | 5 | +5 (Etapa 01) | **10 / 10** |
+| I-type aritmético/lógico/shift | 9 | 0 | +8 (Etapa 02) + `SLTIU`\* | **9 / 9** |
+| I-type load | 5 | 1 (`LW`) | +4 (Etapa 03) | **5 / 5** |
+| S-type | 3 | 1 (`SW`) | +2 (Etapa 03) | **3 / 3** |
+| B-type | 6 | 1 (`BEQ`) | +5 (Etapa 03) | **6 / 6** |
+| U-type | 2 | 0 | +2 (Etapa 02) | **2 / 2** |
+| J-type / Jump (`JAL`, `JALR`) | 2 | 0 | +2 (Etapa 03) | **2 / 2** |
+| **Total** | **37** | **8** | **+28 (+1 extra)** | **37 / 37** |
+
+> \* Além das 8 instruções listadas na Etapa 02, `SLTIU` (`funct3 = 3'b011`) também está decodificada em `src/pl_alu_ctrl.sv`, completando as 37 instruções do subconjunto listado.
+
+---
+
+## Instruções Implementadas por Etapa
 
 ### Etapa 01 — 27/10/2026: R-type
 
 #### Aritmética, lógica e deslocamentos (R-type)
 
-| # | Instrução | Tipo | Opcode  | Status |
-|---|-----------|------|---------|:------:|
-| 1 | `XOR`     | R    | 0110011 | 🧪 |
-| 2 | `SLL`     | R    | 0110011 | 🧪 |
-| 3 | `SRL`     | R    | 0110011 | 🧪 |
-| 4 | `SRA`     | R    | 0110011 | 🧪 |
-| 5 | `SLTU`    | R    | 0110011 | 🧪 |
+| Instrução | Tipo | Opcode | `funct3` | `funct7` | Status |
+|---|:---:|:---:|:---:|:---:|:---:|
+| `XOR` | R | `0110011` | `100` | `0000000` | ✅ |
+| `SLL` | R | `0110011` | `001` | `0000000` | ✅ |
+| `SRL` | R | `0110011` | `101` | `0000000` | ✅ |
+| `SRA` | R | `0110011` | `101` | `0100000` | ✅ |
+| `SLTU` | R | `0110011` | `011` | `0000000` | ✅ |
 
-As cinco operações estão em `src/pl_alu_ctrl.sv` e `src/pl_alu.sv`. Há um programa de exercício em `mifs/etapa01_instruction.mif` e sua imagem `mifs/etapa01_program.hex` (arquivos locais ainda não versionados), mas `modelsim/program.hex` não as exercita e não há resultado esperado/execução verificada para o novo programa. **Próximo passo:** conferir os casos de deslocamento de 0 e 31 bits, operandos negativos, comparação signed/unsigned e dependências de forwarding; automatizar a comparação do estado esperado antes de considerar a etapa validada.
+**Modificações necessárias:**
+- **`src/pl_alu_ctrl.sv`:** decodificação de `Funct3` e `Funct7[5]` no modo `ALUOp = 2'b10` para selecionar os códigos `ALU_XOR` (`4'd03`), `ALU_SLL` (`4'd06`), `ALU_SRL` (`4'd07`), `ALU_SRA` (`4'd08`) e `ALU_SLTU` (`4'd12`).
+- **`src/pl_alu.sv`:** implementação das 5 operações em 32 bits (`SrcA ^ SrcB`, deslocamentos usando `SrcB[4:0]`, deslocamento aritmético com `$signed(SrcA) >>> SrcB[4:0]` e comparação sem sinal `SrcA < SrcB`).
 
-### Etapa 02 — 03/11/2026: imediatos e U-type
+---
+
+### Etapa 02 — 03/11/2026: I-type e U-type
 
 #### Aritmética, lógica e deslocamentos com imediatos (I-type)
 
-| # | Instrução | Tipo | Opcode  | Status |
-|---|-----------|------|---------|:------:|
-| 1 | `ADDI`    | I    | 0010011 | ❌ |
-| 2 | `ANDI`    | I    | 0010011 | ❌ |
-| 3 | `ORI`     | I    | 0010011 | ❌ |
-| 4 | `SLTI`    | I    | 0010011 | ❌ |
-| 5 | `SLLI`    | I    | 0010011 | ❌ |
-| 6 | `SRLI`    | I    | 0010011 | ❌ |
-| 7 | `SRAI`    | I    | 0010011 | ❌ |
-
-O resumo de cobertura acima contabiliza também `SLTIU` e `XORI`, que fazem parte do RV32I, embora não estejam na lista de acompanhamento do PDF. As sete instruções acima são o escopo explícito da Etapa 02.
+| Instrução | Tipo | Opcode | `funct3` | `funct7` / `imm[11:5]` | Status |
+|---|:---:|:---:|:---:|:---:|:---:|
+| `ADDI` | I | `0010011` | `000` | — | ✅ |
+| `ANDI` | I | `0010011` | `111` | — | ✅ |
+| `ORI` | I | `0010011` | `110` | — | ✅ |
+| `SLTI` | I | `0010011` | `010` | — | ✅ |
+| `SLLI` | I | `0010011` | `001` | `0000000` | ✅ |
+| `SRLI` | I | `0010011` | `101` | `0000000` | ✅ |
+| `SRAI` | I | `0010011` | `101` | `0100000` | ✅ |
+| `XORI` | I | `0010011` | `100` | — | ✅ |
 
 #### Imediato superior (U-type)
 
-| # | Instrução | Tipo | Opcode  | Status |
-|---|-----------|------|---------|:------:|
-| 1 | `LUI`     | U    | 0110111 | ❌ |
-| 2 | `AUIPC`   | U    | 0010111 | ❌ |
+| Instrução | Tipo | Opcode | Comportamento | Status |
+|---|:---:|:---:|---|:---:|
+| `LUI` | U | `0110111` | `rd = imm[31:12] << 12` (`0 + ImmExt`) | ✅ |
+| `AUIPC` | U | `0010111` | `rd = PC + (imm[31:12] << 12)` | ✅ |
 
-**Implementação necessária:** habilitar o opcode de I-type aritmético em `pl_control.sv`, gerar os imediatos em `pl_sign_ext.sv`, selecionar a operação em `pl_alu_ctrl.sv` e tratar `LUI`/`AUIPC` com o PC e a origem correta do resultado no pipeline. Validar sinal, limites dos imediatos e forwarding.
+**Modificações necessárias:**
+- **`src/pl_control.sv`:** reconhecimento dos opcodes `I_TYPE` (`7'b0010011`, `ALUOp = 2'b11`, `ALUSrc = 1`, `RegWrite = 1`), `LUI` (`7'b0110111`, `ALUSrcA = 2'b10`, `ALUSrc = 1`, `ALUOp = 2'b00`) e `AUIPC` (`7'b0010111`, `ALUSrcA = 2'b01`, `ALUSrc = 1`, `ALUOp = 2'b00`).
+- **`src/pl_sign_ext.sv`:** extensão de sinal do imediato de 12 bits (`Instr[31:20]`) para `I_TYPE` e montagem do imediato superior (`{Instr[31:12], 12'b0}`) para `LUI`/`AUIPC`.
+- **`src/pl_alu_ctrl.sv`:** inclusão do caso `ALUOp = 2'b11` para mapear `Funct3` (e `Funct7[5]` em `SRLI`/`SRAI`) nas operações da ALU.
+- **`src/pl_pipe_pkg.sv` e `src/pl_datapath.sv`:** propagação do sinal `alu_src_a[1:0]` no registrador `ID/EX` e adição do multiplexador `SrcA` da ALU no estágio `EX` (`2'b00`: `fwd_srca`, `2'b01`: `id_ex.pc` para `AUIPC`, `2'b10`: `32'b0` para `LUI`).
 
-### Etapa 03 — 10/11/2026: memória, branches e jumps
+---
 
-#### Acesso à memória — loads (I-type)
+### Etapa 03 — 10/11/2026: Memória, Desvios e Jumps
 
-| # | Instrução | Tipo | Opcode  | Status |
-|---|-----------|------|---------|:------:|
-| 1 | `LB`      | I    | 0000011 | ❌ |
-| 2 | `LH`      | I    | 0000011 | ❌ |
-| 3 | `LBU`     | I    | 0000011 | ❌ |
-| 4 | `LHU`     | I    | 0000011 | ❌ |
+#### Acesso à memória (I-type load e S-type)
 
-#### Acesso à memória — stores (S-type)
+| Instrução | Tipo | Opcode | `funct3` | Largura / Extensão | Status |
+|---|:---:|:---:|:---:|---|:---:|
+| `LB` | I | `0000011` | `000` | 8 bits com sinal | ✅ |
+| `LH` | I | `0000011` | `001` | 16 bits com sinal | ✅ |
+| `LBU` | I | `0000011` | `100` | 8 bits sem sinal (zero) | ✅ |
+| `LHU` | I | `0000011` | `101` | 16 bits sem sinal (zero) | ✅ |
+| `SB` | S | `0100011` | `000` | Escrita de 1 byte | ✅ |
+| `SH` | S | `0100011` | `001` | Escrita de 2 bytes | ✅ |
 
-| # | Instrução | Tipo | Opcode  | Status |
-|---|-----------|------|---------|:------:|
-| 1 | `SB`      | S    | 0100011 | ❌ |
-| 2 | `SH`      | S    | 0100011 | ❌ |
+**Modificações necessárias (memória):**
+- **`src/pl_pipe_pkg.sv`:** propagação de `funct3` para o registrador `EX/MEM` (`ex_mem.funct3`).
+- **`src/pl_dmem.sv`:** adição da entrada `ByteEnable[3:0]` para escrita seletiva por lane de byte na RAM síncrona.
+- **`src/pl_datapath.sv`:**
+  - **Stores (`SB`, `SH`, `SW`):** deslocamento do dado (`write_data << {alu_result[1:0], 3'b000}`) e geração de `ram_byte_enable` conforme `ex_mem.funct3` e `alu_result[1:0]`.
+  - **Loads (`LB`, `LH`, `LBU`, `LHU`, `LW`):** extração da sub-palavra lida (`dmem_rd >> byte_shift`) e extensão de sinal ou zero conforme `ex_mem.funct3`. Acessos ao MMIO continuam restritos a palavras completas (`funct3 == 3'b010` com `alu_result[1:0] == 2'b00`).
 
 #### Desvios condicionais (B-type)
 
-| # | Instrução | Tipo | Opcode  | Status |
-|---|-----------|------|---------|:------:|
-| 1 | `BNE`     | B    | 1100011 | ❌ |
-| 2 | `BLT`     | B    | 1100011 | ❌ |
-| 3 | `BGE`     | B    | 1100011 | ❌ |
-| 4 | `BLTU`    | B    | 1100011 | ❌ |
-| 5 | `BGEU`    | B    | 1100011 | ❌ |
+| Instrução | Tipo | Opcode | `funct3` | Condição | Status |
+|---|:---:|:---:|:---:|---|:---:|
+| `BNE` | B | `1100011` | `001` | `rs1 != rs2` | ✅ |
+| `BLT` | B | `1100011` | `100` | `rs1 < rs2` (signed) | ✅ |
+| `BGE` | B | `1100011` | `101` | `rs1 >= rs2` (signed) | ✅ |
+| `BLTU` | B | `1100011` | `110` | `rs1 < rs2` (unsigned) | ✅ |
+| `BGEU` | B | `1100011` | `111` | `rs1 >= rs2` (unsigned) | ✅ |
 
-#### Jumps (JAL J-type; JALR I-type)
+**Modificações necessárias (branches):**
+- **`src/pl_datapath.sv`:** substituição da condição fixa de `BEQ` no estágio `EX` por um bloco `case (id_ex.funct3)` avaliando `fwd_srca` e `fwd_srcb` (já após forwarding), mantendo o cálculo de destino `id_ex.pc + id_ex.imm_ext` e o flush de `IF/ID` e `ID/EX` quando tomado.
 
-| # | Instrução | Tipo | Opcode  | Status |
-|---|-----------|------|---------|:------:|
-| 1 | `JAL`     | J    | 1101111 | ❌ |
-| 2 | `JALR`    | I    | 1100111 | ❌ |
+#### Jumps (J-type e I-type)
 
-**Implementação necessária:** usar `funct3` para selecionar tamanho, extensão de sinal e habilitação de bytes nos acessos à memória; distinguir as condições de branch; acrescentar alvo, retorno `PC+4` e flush para `JAL`/`JALR`. Hoje `pl_control.sv` reconhece os opcodes de load/store/branch sem diferenciar suas variantes, e `pl_dmem.sv` só escreve palavras inteiras.
+| Instrução | Tipo | Opcode | `funct3` | Alvo / Retorno | Status |
+|---|:---:|:---:|:---:|---|:---:|
+| `JAL` | J | `1101111` | — | `PC = PC + imm_J`, `rd = PC + 4` | ✅ |
+| `JALR` | I | `1100111` | `000` | `PC = (rs1 + imm_I) & ~1`, `rd = PC + 4` | ✅ |
 
-### Apresentação — 17/11/2026
-
-Entregar **código e relatório no repositório** e preparar explanação por grupos de instruções e demonstração na FPGA. Segundo `instructions/projeto.pdf` (na raiz do projeto), a avaliação é 70% implementação + relatório, 20% apresentação e 10% participação nos acompanhamentos.
-
-### Pendências transversais e ordem sugerida
-
-1. **Validar a Etapa 01:** usar o programa local em `mifs/etapa01_*` para criar uma verificação autochecking das cinco operações R-type sem substituir o teste legado de hazards; registrar resultados da simulação e versionar os artefatos quando estiverem prontos.
-2. **Corrigir a UART antes da demonstração:** `pl_top.sv` alimenta a CPU/MMIO a 10 MHz via PLL, mas `pl_mmio.sv` fixa `CLK_HZ=50_000_000` em `pl_uart`. Assim, a UART fica próxima de 1920 baud no top principal, não 9600. Parametrizar a frequência por top-level e conferir a variante `pl_top_no_pll.sv`.
-3. **Tornar os testes confiáveis:** `pl_cpu_tb.sv` considera a ausência de `golden.txt` como zero erros; fazer a ausência falhar e acrescentar casos específicos das etapas seguintes. Confirmar o diretório de execução, pois as memórias carregam `program.hex` e `data.hex` por caminhos relativos.
-4. **Preparar os projetos de ferramenta:** os arquivos `.mpf`, `.qpf`, `.qsf` e os MIFs de trabalho citados nas instruções de uso não estão versionados; verificar a criação/configuração do ModelSim e Quartus antes de depender dessas receitas. Validar síntese, timing e UART na placa, não apenas no código.
-5. **Revisar o assembler junto dos testes:** ele aceita instruções ainda não implementadas pela CPU; validar faixa e alinhamento dos imediatos (incluindo limites negativos) e evitar que uma montagem bem-sucedida seja confundida com um teste do hardware.
-
-**Critério para marcar ✅ nas novas instruções:** implementação no hardware + programa de teste com resultado esperado verificado em simulação; para a apresentação, acrescentar evidência de execução na FPGA. O PDF do projeto é a referência para datas e escopo das etapas.
+**Modificações necessárias (jumps):**
+- **`src/pl_control.sv` e `src/pl_pipe_pkg.sv`:** decodificação de `JAL` (`Jump = 2'b01`, `RegWrite = 1`) e `JALR` (`Jump = 2'b10`, `RegWrite = 1`), propagando `jump[1:0]` pelo registrador `ID/EX`.
+- **`src/pl_sign_ext.sv`:** suporte ao imediato de 20 bits deslocado com extensão de sinal do tipo J (`JAL`) e de 12 bits do tipo I para `JALR`.
+- **`src/pl_datapath.sv`:** cálculo do alvo em `EX` (`id_ex.pc + id_ex.imm_ext` para `JAL`; `(fwd_srca + id_ex.imm_ext) & 32'hfffffffe` para `JALR`), ativação de `pc_src` (com o mesmo flush de `IF/ID` e `ID/EX` usado em branches) e seleção de `ex_result = id_ex.pc + 32'd4` para escrita em `rd` e forwarding via `EX/MEM`/`MEM/WB`.
 
 ---
 
-## Arquitetura
+## Resumo das Modificações nos Módulos
 
-### Pipeline de 5 estágios
-
-```
-+------+     +------+     +------+     +------+     +------+
-|  IF  | --> |  ID  | --> |  EX  | --> | MEM  | --> |  WB  |
-+------+     +------+     +------+     +------+     +------+
-  Busca      Decode       Execução     Memória     Write-back
-  instrução  Regs         ALU          dmem/MMIO   Regfile
-             Sign-ext     Branch
-```
-
-**Registradores de pipeline:** `IF/ID`, `ID/EX`, `EX/MEM`, `MEM/WB` (definidos em `pl_pipe_pkg.sv`).
-
-### Tratamento de hazards
-
-| Hazard | Mecanismo | Detalhe |
-|--------|-----------|---------|
-| RAW (dado) | Forwarding | EX/MEM → EX e MEM/WB → EX (`pl_forward.sv`) |
-| Load-use | Stall | 1 bolha inserida em ID/EX (`pl_hazard.sv`) |
-| Branch taken | Flush | 2 NOPs (IF e ID) na resolução em EX (`pl_datapath.sv`) |
-
-**Resolução de branch no estágio EX:** quando `BEQ` é tomado, o PC retorna ao alvo e os dois estágios anteriores são esvaziados. O custo é de 2 ciclos de penalidade por branch tomado.
-
-**Banco de registradores com escrita em negedge:** a escrita ocorre na borda de descida do clock, garantindo que o estágio ID leia o valor atualizado no próximo posedge sem necessidade de forwarding WB→ID explícito.
-
-### Mapa de memória
-
-| Endereço (byte) | Tamanho | Acesso | Descrição |
-|-----------------|---------|--------|-----------|
-| `0x000 – 0x3FC` | 256 × 32 b | R/W | Memória de dados (`pl_dmem`) |
-| `0x400` | 32 b | R | SW\[17:0\] — chaves deslizantes |
-| `0x404` | 32 b | R | KEY\[3:0\] — botões push |
-| `0x408` | 32 b | W | LEDR\[17:0\] — LEDs vermelhos |
-| `0x40C` | 32 b | W | LEDG\[8:0\] — LEDs verdes |
-| `0x410` | 32 b | R/W | UART RS-232 (8N1; 9600 baud pretendidos, pendente de correção do clock) |
-| `0x414` | 32 b | R | Contador de ciclos de clock (32 bits, reset em 0) |
-
-Seleção: `alu_result[10] = 1` redireciona o acesso ao controlador MMIO (`pl_mmio`).
-
-**Leitura da UART (`lw` em 0x410):** `{22'b0, tx_busy[9], rx_ready[8], rx_data[7:0]}`
-
-**Escrita na UART (`sw` em 0x410):** o hardware (`pl_mmio`) divide automaticamente a palavra de 32 bits em 4 bytes e os envia em sequência little-endian (byte 0 primeiro). `tx_busy` permanece alto até o último byte ser aceito pelo shift register. O software deve aguardar `tx_busy = 0` antes de escrever nova palavra.
-
-### ALU — codificação de operação
-
-| Operation | Instrução |
-|-----------|-----------|
-| `4'd01` ADD | LW, SW, ADD |
-| `4'd02` SUB | BEQ (comparação) |
-| `4'd03` XOR | XOR |
-| `4'd04` OR  | OR |
-| `4'd05` AND | AND |
-| `4'd06` SLL | SLL |
-| `4'd07` SRL | SRL |
-| `4'd08` SRA | SRA |
-| `4'd11` SLT | SLT |
-| `4'd12` SLTU | SLTU |
+| Arquivo | Papel nas Etapas 01–03 |
+|---|---|
+| `src/pl_alu.sv` | Operações `XOR`, `SLL`, `SRL`, `SRA` e `SLTU` (Etapa 01, reutilizadas na Etapa 02) |
+| `src/pl_alu_ctrl.sv` | Decodificação de `R-type` estendido (Etapa 01) e `ALUOp = 2'b11` para `I-type` (Etapa 02) |
+| `src/pl_control.sv` | Opcodes `I_TYPE`, `LUI`, `AUIPC` (Etapa 02) e `JAL`, `JALR` (Etapa 03) |
+| `src/pl_sign_ext.sv` | Imediatos I, U (`LUI`/`AUIPC`) e J (`JAL`) |
+| `src/pl_pipe_pkg.sv` | Campos `alu_src_a` e `jump` em `id_ex_t`; `funct3` em `ex_mem_t` |
+| `src/pl_dmem.sv` | Escrita mascarada por byte (`ByteEnable[3:0]`) para `SB` e `SH` |
+| `src/pl_datapath.sv` | Mux `ALUSrcA` (`LUI`/`AUIPC`), 6 condições de branch em `EX`, cálculo/retorno `PC+4` de `JAL`/`JALR`, alinhamento e extensão em sub-word loads/stores |
 
 ---
 
-## Estrutura do repositório
+## Estrutura do Repositório
 
-```
-rv32i_pipelined_base_project/
-│
-├── src/                        Código-fonte SystemVerilog
-│   ├── pl_pipe_pkg.sv          Structs dos registradores de pipeline
-│   ├── pl_top.sv               Top-level (PLL 50→10 MHz + CPU)
-│   ├── pl_top_no_pll.sv        Top-level alternativo (clock direto de 50 MHz)
-│   ├── pl_cpu.sv               Wrapper: Control + ALU_Ctrl + Datapath
-│   ├── pl_control.sv           Unidade de controle (estágio ID)
-│   ├── pl_alu_ctrl.sv          Controle da ALU (estágio EX)
-│   ├── pl_alu.sv               ALU 32 bits
-│   ├── pl_regfile.sv           Banco de registradores 32×32 b
-│   ├── pl_sign_ext.sv          Extensão de sinal I/S/B
-│   ├── pl_imem.sv              Memória de instruções 256×32 b (MIF)
-│   ├── pl_dmem.sv              Memória de dados 256×32 b (MIF)
-│   ├── pl_mmio.sv              Controlador MMIO (SW/KEY/LED/UART)
-│   ├── pl_uart.sv              UART RS-232 8N1 (divisor parametrizável; ver pendência do clock)
-│   ├── pl_hazard.sv            Detecção de hazard load-use
-│   ├── pl_forward.sv           Unidade de forwarding
-│   ├── pl_datapath.sv          Datapath 5 estágios
-│   ├── pl_cpu_tb.sv            Testbench de verificação
-│   └── pll_10mhz.v             PLL Altera (50 MHz → 10 MHz)
-│
-├── mifs/                       Arquivos de inicialização de memória
-│   ├── instruction_halt_serial.mif  Programa demonstrativo com UART/LED
-│   ├── data_halt_serial.mif         Dados desse programa
-│   ├── mmio_test_program.mif   Programa de teste MMIO + UART
-│   └── mmio_test_data.mif      Dados para o teste MMIO
-│
-├── assembler/
-│   ├── assembler.py            Montador Python: assembly → .mif / dump
-│   ├── hello.asm               Programa de entrada padrão
-│   ├── instruction.mif         MIF gerado (não versionado)
-│   ├── data.mif                MIF gerado em --dump (não versionado)
-│   └── program.hex             Hex gerado (não versionado)
-│
-├── dump/
-│   └── serial_dump.py          Captura e decodifica dump serial do FPGA
-│
-├── modelsim/                   Dados versionados para simulação
-│   ├── program.hex             Imagem da instrução (.hex para $readmemh)
-│   ├── data.hex                Imagem dos dados (.hex para $readmemh)
-│   ├── golden.txt              Saída esperada pelo testbench
-│
-└── quartus/                    Arquivos auxiliares versionados para síntese
-    ├── add_to_qsf.txt          Atribuições de pinos para incorporar ao QSF
-    ├── pl_top.sdc              Restrições de timing com PLL
-    └── pl_top_no_pll.sdc       Restrições de timing sem PLL
+```text
+repo_apresentacao/
+├── src/                        RTL SystemVerilog do processador, MMIO, UART e testbench
+├── assembler/                  Montador Python (assembler.py) e programas de teste (.asm)
+│   ├── etapa01_test.asm        Programa de teste das instruções R-type (Etapa 01)
+│   ├── etapa03_test.asm        Programa de teste de memória sub-word, branches e jumps (Etapa 03)
+│   └── hello_e2.asm            Programa integrado com resultados esperados em CSV
+├── dump/                       Captura/validação UART (serial_dump.py, test_serial_dump.py, capturas)
+├── quartus/                    Projeto Quartus Prime (pl_top.qpf, pl_top.qsf, .sdc, .sof e MIF/HEX)
+└── etapa03_placa_01.*          Evidência de captura na placa para a Etapa 03
 ```
 
 ---
 
-## Como simular (ModelSim)
+## Fluxo Rápido de Montagem, Síntese e Validação
 
-1. Crie ou recupere um projeto ModelSim (o arquivo `.mpf` não está versionado) e use `modelsim/` como diretório de execução para localizar `program.hex`, `data.hex` e `golden.txt`.
-2. Compile todos os arquivos em `src/` — compilar `pl_pipe_pkg.sv` primeiro.
-3. Inicie a simulação com o top `pl_cpu_tb`.
-4. Execute `run -all`.
+1. **Montar programa para FPGA com dump serial embarcado:**
+   ```bash
+   cd assembler
+   python3 assembler.py --dump etapa03_test.asm
+   ```
+   O script gera e sincroniza `instruction.mif`, `data.mif`, `program.hex` e `data.hex` em `src/` e `quartus/`.
 
-O testbench detecta o halt automaticamente (repetição periódica do PC causada pelo `beq x0, x0, 0`), imprime o estado final dos registradores e da memória, e compara a saída com `modelsim/golden.txt`.
+2. **Sintetizar e gravar na DE2-115 (Quartus Prime):**
+   - Abrir `quartus/pl_top.qpf` (dispositivo `EP4CE115F29C7`, top-level `pl_top` com PLL 50 MHz → 10 MHz) e compilar/programar o `.sof`.
 
-**Programa de teste padrão (`modelsim/program.hex`):**
-
-```
-000: lw  x1,  0(x0)   x1 = 10
-001: lw  x2,  4(x0)   x2 = 20
-002: add x3, x1, x2   x3 = 30   -- forwarding MEM/WB→EX
-003: and x4, x3, x1   x4 = 10   -- forwarding EX/MEM→EX
-004: lw  x5,  0(x0)   x5 = 10   -- causa load-use stall
-005: add x6, x5, x2   x6 = 30   -- executado após 1 ciclo de stall
-006: sw  x3,  8(x0)   dmem[2] = 30
-007: beq x1, x2, +8   NÃO tomado (10 ≠ 20)
-008: add x7, x1, x2   x7 = 30
-009: beq x1, x5, +8   TOMADO (10 = 10) → flush de 00A
-00A: add x8, x0, x0   DESCARTADO
-00B: add x8, x1, x4   x8 = 20
-00C: beq x0, x0,  0   halt
-```
-
-Estado final esperado: `x1=10  x2=20  x3=30  x4=10  x5=10  x6=30  x7=30  x8=20  dmem[2]=30`
-
----
-
-## Como sintetizar (Quartus)
-
-1. Crie ou recupere o projeto Quartus para a DE2-115 (`.qpf`/`.qsf` não versionados), selecionando o top-level e incluindo os arquivos de `src/` (compile o pacote primeiro). Use `quartus/add_to_qsf.txt` e o `.sdc` correspondente ao top-level.
-2. Gere ou copie `instruction.mif` e `data.mif` para o diretório onde a inicialização da RAM será resolvida pelo Quartus; eles não estão versionados em `quartus/`.
-3. Execute **Processing → Start Compilation**.
-4. Grave o bitstream na DE2-115 via JTAG.
-
-**Dispositivo alvo:** Intel Cyclone IV E — EP4CE115F29C7  
-**Clock:** 50 MHz (entrada) → 10 MHz (saída da PLL, usado pelo CPU)  
-**Reset:** KEY\[0\] ativo-baixo; liberado após a PLL travar.
-
----
-
-## Assembler
-
-O script `assembler/assembler.py` converte assembly textual para o formato `.mif`.
-
-### Uso
-
-```bash
-cd assembler
-
-# modo normal — gera instruction.mif + program.hex
-python3 assembler.py programa.asm
-
-# sem argumento — usa instructions.txt como padrão
-python3 assembler.py
-
-# modo dump — gera instruction.mif + data.mif com dump serial embutido
-python3 assembler.py --dump programa.asm
-```
-
-Todos os arquivos de saída são gerados na pasta `assembler/`.
-
-### Modo normal
-
-| Arquivo | Formato | Uso |
-|---------|---------|-----|
-| `instruction.mif` | Quartus MIF | Inicialização da memória na síntese Quartus |
-| `program.hex` | Um word hex por linha | Simulação via `$readmemh` |
-
-### Modo `--dump`
-
-Anexa automaticamente o código de dump serial ao programa do usuário, sem que o usuário precise escrever nenhuma instrução extra.
-
-| Arquivo | Conteúdo |
-|---------|----------|
-| `instruction.mif` | Código do usuário + `beq` de desvio + dump serial a partir de `0x080` |
-| `data.mif` | Zeros + constantes de infraestrutura do dump em `0x080–0x086` |
-
-**Layout da memória de instruções com `--dump`:**
-
-```
-0x000..N-1  Código do usuário (máx. 127 instruções)
-0xN         beq x0,x0,→0x80   (desvio incondicional para o dump)
-0xN+1..07F  NOP (addi x0,x0,0)
-0x080..0x0AD  Dump serial — Parts 2–8 (46 instruções)
-```
-
-**Layout da memória de dados com `--dump`:**
-
-```
-0x000..0x01F  Área do usuário  (byte 0x000–0x07C) — transmitida no dump
-0x078..0x07F  Saves de x1–x8  (byte 0x1E0–0x1FC) — escritos em runtime
-0x080..0x086  Constantes de infraestrutura         — inicializadas no MIF
-```
-
-**O que o dump transmite via UART (164 bytes = 41 palavras):**
-
-```
-bytes  0–  3   Contador de ciclos (MMIO 0x414)
-bytes  4– 35   Registradores x1–x8
-bytes 36–163   dmem[0x000–0x07C] (32 palavras do usuário)
-```
-
-O programa do usuário pode ter no máximo **127 instruções**; o assembler valida e reporta erro se excedido.
-
-### Formato de entrada aceito
-
-```
-add  x3,x1,x2
-lw   x1,0(x0)
-sw   x3,8(x0)
-beq  x1,x2,-4
-```
-
-Uma instrução por linha, sem rótulos, sem comentários. O argumento de arquivo é opcional — o padrão é `instructions.txt`.
-
----
-
-## Detalhes de implementação
-
-### Banco de registradores — escrita em negedge
-
-A escrita no banco de registradores ocorre na **borda de descida** do clock (`negedge clk`). Isso resolve o conflito de leitura/escrita simultânea que ocorre quando, após um load-use stall, o estágio WB escreve um registrador no mesmo ciclo em que o estágio ID o lê para captura no registrador ID/EX. Com a escrita em negedge, o valor é garantidamente visível antes do próximo posedge. Esta é a solução descrita na Fig. 4.63 do P&H.
-
-### Detecção de halt no testbench
-
-O halt é implementado como `beq x0, x0, 0`. Com resolução de branch no estágio EX, o PC oscila com período 3 (H, H+4, H+8, H, …). O testbench detecta halt quando `PC_atual == PC_de_3_ciclos_atrás` por 9 ciclos consecutivos (3 períodos completos).
-
-### UART (9600 8N1 pretendidos; clock pendente)
-
-Implementada em `pl_uart.sv` e instanciada por `pl_mmio.sv` com `CLK_HZ=50_000_000` e `BAUD=9600`: **na variante sem PLL, a 50 MHz**, são 5208 clocks/bit (~9601 baud). **No top principal com PLL, a 10 MHz**, o mesmo divisor produz aproximadamente 1920 baud. Antes de usar o dump serial a 9600 baud, é necessário passar a frequência real do clock para a UART e testar na FPGA. O sequenciador de `pl_mmio.sv` divide cada `sw` em 0x410 em quatro bytes consecutivos.
-
-### Dump serial
-
-O script `dump/serial_dump.py` captura e decodifica o dump transmitido pelo FPGA. Pré-requisito: `pip install pyserial`.
-
-```bash
-python3 dump/serial_dump.py COM3            # Windows
-python3 dump/serial_dump.py /dev/ttyUSB0   # Linux
-python3 dump/serial_dump.py COM3 --out resultado.txt
-```
-
-Aguarda **164 bytes** (41 palavras × ~4 ms a 9600 baud, **após corrigir o clock**) e exibe ciclos, x1–x8 e dmem[0x000–0x07C]. Para usar, compile com `python3 assembler.py --dump` e grave o bitstream no FPGA.
-
-**Fluxo completo:**
-
-```bash
-cd assembler
-python3 assembler.py --dump meu_programa.asm  # gera instruction.mif + data.mif
-cp instruction.mif data.mif ../quartus/        # copia para o projeto Quartus
-# compilar e gravar na FPGA via Quartus...
-cd ../dump
-python3 serial_dump.py COM3                    # captura o resultado
-```
-
----
-
-## Recursos
-
-- [Manual RISC-V ISA v2.2](https://riscv.org/wp-content/uploads/2017/05/riscv-spec-v2.2.pdf)
-- [RISC-V ISA Reference (msyksphinz)](https://msyksphinz-self.github.io/riscv-isadoc/html/rvi.html)
-- [RISC-V Interpreter — Cornell University](https://www.cs.cornell.edu/courses/cs3410/2019sp/riscv/interpreter/)
-- Patterson & Hennessy, *Computer Organization and Design: RISC-V Edition*, seções 4.6 – 4.10
+3. **Capturar e validar via UART (9600 8N1):**
+   ```bash
+   python3 dump/serial_dump.py COM3 --raw-out dump/captura.bin --out dump/captura.txt --check-etapa03
+   ```
+   Também há testes unitários offline do parser/validador em `python3 -m unittest discover -s dump -p 'test_serial_dump.py' -v`.
